@@ -269,28 +269,70 @@ async def deploy_got_env(message: Message, state: FSMContext):
         return
 
     # ── Финальный запуск ──────────────────────────────────────────────────────
-    mode_label = "Docker-образа" if pm.DOCKER_AVAILABLE else "виртуального окружения"
-    progress = await message.answer(f"⚙️ Подготовка {mode_label}...")
-
-    # build_image: в Docker режиме — docker build; в прямом — pip install в venv
-    ok, result = await asyncio.get_event_loop().run_in_executor(
-        None, pm.build_image, project_path, project_id
-    )
-    if not ok:
-        await progress.edit_text(
-            f"❌ Ошибка подготовки окружения:\n<code>{result}</code>"
+    if pm.DOCKER_AVAILABLE:
+        # Docker: передаём в executor (блокирующий docker build)
+        progress = await message.answer("🐳 Сборка Docker-образа...")
+        ok, result = await asyncio.get_event_loop().run_in_executor(
+            None, pm.build_image, project_path, project_id
         )
-        dep.cleanup_project(project_path)
-        await state.clear()
-        return
+        if not ok:
+            await progress.edit_text(
+                f"❌ Ошибка сборки образа:\n<code>{result[-800:]}</code>"
+            )
+            dep.cleanup_project(project_path)
+            await state.clear()
+            return
+    else:
+        # Прямой режим: асинхронный pip с живым обновлением сообщения
+        progress = await message.answer(
+            "⚙️ <b>Подготовка виртуального окружения...</b>\n\n"
+            "<code>(ожидание вывода pip)</code>"
+        )
 
-    await progress.edit_text("🚀 Запуск бота...")
+        # Буфер последних символов для отображения
+        output_buf: list[str] = []
+        SHOW_CHARS = 1000
+
+        # Антифлуд: редактируем не чаще раза в секунду
+        _last_edit: list[float] = [0.0]
+
+        async def on_output(chunk: str):
+            output_buf.append(chunk)
+            now = asyncio.get_event_loop().time()
+            if now - _last_edit[0] < 1.0:
+                return
+            _last_edit[0] = now
+            tail = "".join(output_buf)[-SHOW_CHARS:]
+            try:
+                await progress.edit_text(
+                    "⚙️ <b>Подготовка виртуального окружения...</b>\n\n"
+                    f"<code>{tail}</code>"
+                )
+            except Exception:
+                pass  # MessageNotModified и прочие — игнорируем
+
+        ok, result = await pm.async_setup_venv(project_path, on_output)
+
+        # Финальное обновление с полным хвостом
+        tail = "".join(output_buf)[-SHOW_CHARS:]
+        if not ok:
+            await progress.edit_text(
+                f"❌ <b>Ошибка подготовки окружения:</b>\n\n<code>{tail}</code>"
+            )
+            dep.cleanup_project(project_path)
+            await state.clear()
+            return
+        await progress.edit_text(
+            f"✅ <b>Окружение готово!</b>\n\n<code>{tail}</code>"
+        )
+
+    launch_msg = await message.answer("🚀 Запуск бота...")
 
     ok, result = await asyncio.get_event_loop().run_in_executor(
         None, pm.start_bot, project_id, project_path, entry_file
     )
     if not ok:
-        await progress.edit_text(
+        await launch_msg.edit_text(
             f"❌ Ошибка запуска:\n<code>{result}</code>"
         )
         dep.cleanup_project(project_path)
@@ -306,7 +348,7 @@ async def deploy_got_env(message: Message, state: FSMContext):
         f"⚙️ Процесс запущен ({result})"
     )
 
-    await progress.edit_text(
+    await launch_msg.edit_text(
         "🎉 <b>Бот успешно задеплоен!</b>\n\n"
         f"🆔 Project ID: <code>{project_id}</code>\n"
         f"🔧 Точка входа: <code>{entry_file}</code>\n"

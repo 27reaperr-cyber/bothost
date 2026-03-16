@@ -147,9 +147,78 @@ def _direct_setup_venv(project_path: str) -> tuple[bool, str]:
     pip = os.path.join(venv_path, "bin", "pip")
 
     if os.path.exists(req):
-        code, _, err = _run([pip, "install", "--quiet", "-r", req], timeout=300)
+        code, _, err = _run(
+            [pip, "install", "--no-cache-dir", "--timeout", "30", "-r", req],
+            timeout=180,
+        )
         if code != 0:
             return False, f"Ошибка pip install: {err}"
+
+    return True, "venv готов"
+
+
+async def async_setup_venv(
+    project_path: str,
+    on_output,          # callable(str) — вызывается при каждой новой строке
+) -> tuple[bool, str]:
+    """
+    Асинхронная версия с потоковым выводом.
+    on_output(chunk: str) вызывается для каждой новой порции вывода,
+    чтобы бот мог редактировать сообщение в реальном времени.
+    """
+    import asyncio
+
+    venv_path = os.path.join(project_path, ".venv")
+    req = os.path.join(project_path, "requirements.txt")
+
+    # ── Шаг 1: создать venv ───────────────────────────────────────────────────
+    if not os.path.exists(venv_path):
+        await on_output("📦 Создание виртуального окружения...\n")
+        proc = await asyncio.create_subprocess_exec(
+            sys.executable, "-m", "venv", venv_path,
+            stdout=asyncio.subprocess.PIPE,
+            stderr=asyncio.subprocess.STDOUT,
+        )
+        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        output = stdout.decode(errors="replace")
+        if output.strip():
+            await on_output(output)
+        if proc.returncode != 0:
+            return False, f"Ошибка создания venv:\n{output}"
+
+    # ── Шаг 2: pip install ────────────────────────────────────────────────────
+    pip = os.path.join(venv_path, "bin", "pip")
+
+    if not os.path.exists(req):
+        await on_output("⚠️ requirements.txt не найден, пропускаем pip install\n")
+        return True, "venv готов (без зависимостей)"
+
+    await on_output("📥 Запускаю pip install...\n")
+
+    proc = await asyncio.create_subprocess_exec(
+        pip, "install",
+        "--no-cache-dir",
+        "--timeout", "30",
+        "--progress-bar", "off",   # убираем прогресс-бар, оставляем только текст
+        "-r", req,
+        cwd=project_path,
+        stdout=asyncio.subprocess.PIPE,
+        stderr=asyncio.subprocess.STDOUT,
+    )
+
+    # Читаем построчно и отправляем в callback
+    try:
+        async for raw_line in proc.stdout:
+            line = raw_line.decode(errors="replace")
+            await on_output(line)
+
+        await asyncio.wait_for(proc.wait(), timeout=5)
+    except asyncio.TimeoutError:
+        proc.kill()
+        return False, "pip install завис и был остановлен (таймаут)"
+
+    if proc.returncode != 0:
+        return False, "pip install завершился с ошибкой (см. вывод выше)"
 
     return True, "venv готов"
 
