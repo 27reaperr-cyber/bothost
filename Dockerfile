@@ -1,25 +1,23 @@
 FROM python:3.10-slim
 
-# Устанавливаем системные зависимости
+# Системные зависимости: git для клонирования, curl для Docker CLI
 RUN apt-get update && apt-get install -y --no-install-recommends \
     git \
     curl \
     && rm -rf /var/lib/apt/lists/*
 
-# Устанавливаем Docker CLI (для управления дочерними контейнерами)
-RUN curl -fsSL https://get.docker.com | sh
+# Устанавливаем Docker CLI (опционально — бот работает и без него)
+# Если сокет /var/run/docker.sock примонтирован при docker run — будет Docker-режим.
+# Если нет — автоматически включится прямой режим запуска процессов.
+RUN curl -fsSL https://get.docker.com | sh || true
 
 WORKDIR /app
 
-# Копируем зависимости и устанавливаем
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Копируем исходники
 COPY . .
 
-# Создаём рабочие папки
 RUN mkdir -p projects logs
 
-# Запускаем бота
 ENTRYPOINT ["python", "bot.py"]

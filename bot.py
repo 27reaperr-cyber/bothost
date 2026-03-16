@@ -1,18 +1,18 @@
 """
 bot.py — главный файл Telegram-бота BotHost.
-Управляет деплоем, мониторингом и жизненным циклом контейнеров.
+Управляет деплоем, мониторингом и жизненным циклом ботов.
+Работает в двух режимах: Docker (если доступен) или прямой запуск процессов.
 Запуск: python bot.py
 """
 
 import asyncio
 import logging
 import os
-import shutil
 
 from aiogram import Bot, Dispatcher, F
 from aiogram.client.default import DefaultBotProperties
 from aiogram.enums import ParseMode
-from aiogram.filters import CommandStart, Command
+from aiogram.filters import CommandStart
 from aiogram.fsm.context import FSMContext
 from aiogram.fsm.state import State, StatesGroup
 from aiogram.fsm.storage.memory import MemoryStorage
@@ -43,6 +43,7 @@ logger = logging.getLogger(__name__)
 
 MAX_BOTS_PER_USER = 3
 
+
 # ── FSM состояния ─────────────────────────────────────────────────────────────
 
 class DeployStates(StatesGroup):
@@ -72,23 +73,29 @@ def cancel_keyboard() -> ReplyKeyboardMarkup:
 def bot_manage_keyboard(project_id: str) -> InlineKeyboardMarkup:
     return InlineKeyboardMarkup(inline_keyboard=[
         [
-            InlineKeyboardButton(text="▶ Запустить",     callback_data=f"start:{project_id}"),
-            InlineKeyboardButton(text="⏹ Остановить",   callback_data=f"stop:{project_id}"),
+            InlineKeyboardButton(text="▶ Запустить",      callback_data=f"start:{project_id}"),
+            InlineKeyboardButton(text="⏹ Остановить",    callback_data=f"stop:{project_id}"),
         ],
         [
             InlineKeyboardButton(text="🔄 Перезапустить", callback_data=f"restart:{project_id}"),
-            InlineKeyboardButton(text="📜 Логи",          callback_data=f"logs:{project_id}"),
+            InlineKeyboardButton(text="📜 Логи",           callback_data=f"logs:{project_id}"),
         ],
         [
-            InlineKeyboardButton(text="🗑 Удалить",       callback_data=f"delete:{project_id}"),
+            InlineKeyboardButton(text="🗑 Удалить",        callback_data=f"delete:{project_id}"),
         ],
     ])
 
 
-# ── Инициализация ─────────────────────────────────────────────────────────────
+# ── Bot & Dispatcher ──────────────────────────────────────────────────────────
 
 bot = Bot(token=BOT_TOKEN, default=DefaultBotProperties(parse_mode=ParseMode.HTML))
 dp = Dispatcher(storage=MemoryStorage())
+
+
+# ── Вспомогательная функция: путь к проекту ──────────────────────────────────
+
+def _project_path(user_id: int, project_id: str) -> str:
+    return os.path.abspath(os.path.join("projects", str(user_id), project_id))
 
 
 # ── /start ────────────────────────────────────────────────────────────────────
@@ -99,19 +106,21 @@ async def cmd_start(message: Message, state: FSMContext):
     db.upsert_user(message.from_user.id, message.from_user.username or "")
     await message.answer(
         "👋 Добро пожаловать в <b>BotHost</b>!\n\n"
-        "Деплойте Telegram-ботов прямо с GitHub/GitLab.\n"
-        "Выберите действие:",
+        "Деплойте Telegram-ботов прямо с GitHub/GitLab.\n\n"
+        f"Режим запуска: <b>{pm.get_runtime_mode()}</b>",
         reply_markup=main_keyboard(),
     )
 
 
-# ── Главное меню ──────────────────────────────────────────────────────────────
+# ── Отмена ────────────────────────────────────────────────────────────────────
 
 @dp.message(F.text == "❌ Отмена")
 async def cmd_cancel(message: Message, state: FSMContext):
     await state.clear()
     await message.answer("Действие отменено.", reply_markup=main_keyboard())
 
+
+# ── Помощь ────────────────────────────────────────────────────────────────────
 
 @dp.message(F.text == "ℹ️ Помощь")
 async def cmd_help(message: Message):
@@ -120,13 +129,12 @@ async def cmd_help(message: Message):
         "1️⃣ Нажмите <b>🚀 Deploy бот</b>\n"
         "2️⃣ Отправьте ссылку GitHub/GitLab\n"
         "3️⃣ Задайте переменные окружения (или <code>done</code>)\n"
-        "4️⃣ Бот будет запущен в Docker-контейнере!\n\n"
+        "4️⃣ Бот будет запущен автоматически!\n\n"
         "<b>Требования к репозиторию:</b>\n"
         "• Python-проект (bot.py / main.py / app.py)\n"
-        "• Один из фреймворков: aiogram, python-telegram-bot, telebot\n\n"
-        "<b>Лимиты:</b>\n"
-        f"• Максимум {MAX_BOTS_PER_USER} бота на аккаунт\n"
-        "• 512 МБ RAM и 0.5 CPU на контейнер",
+        "• Один из: aiogram, python-telegram-bot, telebot\n\n"
+        f"<b>Лимиты:</b> до {MAX_BOTS_PER_USER} ботов на аккаунт\n"
+        f"<b>Режим:</b> {pm.get_runtime_mode()}",
         reply_markup=main_keyboard(),
     )
 
@@ -138,10 +146,11 @@ async def cmd_server_status(message: Message):
     stats = pm.get_server_stats()
     await message.answer(
         "📊 <b>Статус сервера</b>\n\n"
-        f"🖥 CPU: <b>{stats['cpu']}%</b>\n"
-        f"🧠 RAM: <b>{stats['ram_used']} / {stats['ram_total']} МБ</b> ({stats['ram_percent']}%)\n"
-        f"💾 Диск: <b>{stats['disk_used']} / {stats['disk_total']} ГБ</b> ({stats['disk_percent']}%)\n"
-        f"🐳 Контейнеров: <b>{stats['containers']}</b>",
+        f"🖥 CPU:       <b>{stats['cpu']}%</b>\n"
+        f"🧠 RAM:       <b>{stats['ram_used']} / {stats['ram_total']} МБ</b> ({stats['ram_percent']}%)\n"
+        f"💾 Диск:      <b>{stats['disk_used']} / {stats['disk_total']} ГБ</b> ({stats['disk_percent']}%)\n"
+        f"🤖 Ботов:     <b>{stats['processes']}</b>\n"
+        f"⚙️ Режим:     <b>{stats['mode']}</b>",
         reply_markup=main_keyboard(),
     )
 
@@ -157,15 +166,15 @@ async def cmd_my_bots(message: Message):
 
     for row in bots:
         pid = row["project_id"]
-        # Актуальный статус из Docker
-        docker_status = pm.container_status(pid)
-        status_emoji = "🟢" if docker_status == "running" else "🔴"
+        ppath = _project_path(message.from_user.id, pid)
+        status = pm.bot_status(pid, ppath)
+        emoji = "🟢" if status == "running" else "🔴"
         repo_short = row["repo_url"].replace("https://", "").rstrip("/")
 
         await message.answer(
-            f"{status_emoji} <b>{pid}</b>\n"
+            f"{emoji} <b>{pid}</b>\n"
             f"📁 {repo_short}\n"
-            f"📌 Статус: <code>{docker_status}</code>\n"
+            f"📌 Статус: <code>{status}</code>\n"
             f"🔧 Точка входа: <code>{row['entry_file']}</code>",
             reply_markup=bot_manage_keyboard(pid),
         )
@@ -178,10 +187,9 @@ async def deploy_start(message: Message, state: FSMContext):
     user_id = message.from_user.id
     db.upsert_user(user_id, message.from_user.username or "")
 
-    # Проверяем лимит
     if db.count_user_bots(user_id) >= MAX_BOTS_PER_USER:
         await message.answer(
-            f"❌ Достигнут лимит: максимум {MAX_BOTS_PER_USER} бота на аккаунт.\n"
+            f"❌ Лимит: максимум {MAX_BOTS_PER_USER} бота на аккаунт.\n"
             "Удалите один из существующих ботов.",
             reply_markup=main_keyboard(),
         )
@@ -190,36 +198,32 @@ async def deploy_start(message: Message, state: FSMContext):
     await state.set_state(DeployStates.waiting_url)
     await message.answer(
         "🔗 <b>Шаг 1/2 — Репозиторий</b>\n\n"
-        "Отправьте ссылку на GitHub или GitLab репозиторий:\n\n"
+        "Отправьте ссылку на GitHub или GitLab:\n\n"
         "<code>https://github.com/user/my-bot</code>",
         reply_markup=cancel_keyboard(),
     )
 
 
-# ── Deploy: Шаг 2 — получаем URL, клонируем, валидируем ──────────────────────
+# ── Deploy: Шаг 2 — клонирование и валидация ─────────────────────────────────
 
 @dp.message(DeployStates.waiting_url)
 async def deploy_got_url(message: Message, state: FSMContext):
     repo_url = message.text.strip()
 
-    # Шаг 2: валидация URL
     ok, url_or_err = dep.validate_git_url(repo_url)
     if not ok:
         await message.answer(url_or_err)
         return
 
-    processing_msg = await message.answer("⏳ Клонирование репозитория...")
+    progress = await message.answer("⏳ Клонирование репозитория...")
 
-    # Шаг 3–8: подготовка проекта
     ok, msg, info = await asyncio.get_event_loop().run_in_executor(
         None, dep.prepare_project, message.from_user.id, url_or_err
     )
-
     if not ok:
-        await processing_msg.edit_text(msg)
+        await progress.edit_text(msg)
         return
 
-    # Сохраняем в FSM
     await state.update_data(
         repo_url=url_or_err,
         project_id=info["project_id"],
@@ -227,122 +231,158 @@ async def deploy_got_url(message: Message, state: FSMContext):
         entry_file=info["entry_file"],
     )
 
-    await processing_msg.edit_text(
+    await progress.edit_text(
         f"✅ Репозиторий клонирован!\n\n"
         f"🆔 Project ID: <code>{info['project_id']}</code>\n"
         f"🔧 Точка входа: <code>{info['entry_file']}</code>\n\n"
         "━━━━━━━━━━━━━━━━━━━━\n"
         "📝 <b>Шаг 2/2 — Переменные окружения</b>\n\n"
-        "Отправьте переменные в формате:\n"
-        "<code>BOT_TOKEN=123456:ABC\n"
-        "API_KEY=mykey</code>\n\n"
-        "Когда закончите — напишите <code>done</code>\n"
-        "Если ENV не нужны — сразу напишите <code>done</code>"
+        "Отправьте переменные:\n"
+        "<code>BOT_TOKEN=123456:ABC\nAPI_KEY=secret</code>\n\n"
+        "Если ENV не нужны — напишите <code>done</code>"
     )
     await state.set_state(DeployStates.waiting_env)
 
 
-# ── Deploy: Шаг 3 — ENV переменные ───────────────────────────────────────────
+# ── Deploy: Шаг 3 — ENV и финальный запуск ────────────────────────────────────
 
 @dp.message(DeployStates.waiting_env)
 async def deploy_got_env(message: Message, state: FSMContext):
     text = message.text.strip()
     data = await state.get_data()
-    project_id = data["project_id"]
+    project_id   = data["project_id"]
     project_path = data["project_path"]
-    entry_file = data["entry_file"]
-    repo_url = data["repo_url"]
-    user_id = message.from_user.id
+    entry_file   = data["entry_file"]
+    repo_url     = data["repo_url"]
+    user_id      = message.from_user.id
 
-    # Накапливаем строки ENV
+    # Накапливаем ENV пока не "done"
     if text.lower() != "done":
         ok, err = dep.save_env(project_path, text)
         if not ok:
             await message.answer(err)
             return
-        await message.answer("✅ Переменные сохранены. Продолжайте или напишите <code>done</code>.")
+        await message.answer(
+            "✅ Переменные сохранены. "
+            "Добавьте ещё или напишите <code>done</code>."
+        )
         return
 
-    # Финальный деплой
-    processing_msg = await message.answer("🐳 Сборка Docker-образа и запуск контейнера...")
+    # ── Финальный запуск ──────────────────────────────────────────────────────
+    mode_label = "Docker-образа" if pm.DOCKER_AVAILABLE else "виртуального окружения"
+    progress = await message.answer(f"⚙️ Подготовка {mode_label}...")
 
-    # Сборка образа
-    ok, image_or_err = await asyncio.get_event_loop().run_in_executor(
+    # build_image: в Docker режиме — docker build; в прямом — pip install в venv
+    ok, result = await asyncio.get_event_loop().run_in_executor(
         None, pm.build_image, project_path, project_id
     )
     if not ok:
-        await processing_msg.edit_text(f"❌ Ошибка сборки Docker-образа:\n<code>{image_or_err}</code>")
+        await progress.edit_text(
+            f"❌ Ошибка подготовки окружения:\n<code>{result}</code>"
+        )
         dep.cleanup_project(project_path)
         await state.clear()
         return
 
-    # Запуск контейнера
+    await progress.edit_text("🚀 Запуск бота...")
+
     ok, result = await asyncio.get_event_loop().run_in_executor(
-        None, pm.start_container, project_id, project_path, entry_file
+        None, pm.start_bot, project_id, project_path, entry_file
     )
     if not ok:
-        await processing_msg.edit_text(f"❌ Ошибка запуска контейнера:\n<code>{result}</code>")
+        await progress.edit_text(
+            f"❌ Ошибка запуска:\n<code>{result}</code>"
+        )
         dep.cleanup_project(project_path)
         await state.clear()
         return
 
-    # Сохраняем в БД
     db.add_bot(project_id, user_id, repo_url, entry_file)
     await state.clear()
 
-    await processing_msg.edit_text(
+    mode_info = (
+        f"🐳 Контейнер: <code>bot_{project_id}</code>"
+        if pm.DOCKER_AVAILABLE else
+        f"⚙️ Процесс запущен ({result})"
+    )
+
+    await progress.edit_text(
         "🎉 <b>Бот успешно задеплоен!</b>\n\n"
         f"🆔 Project ID: <code>{project_id}</code>\n"
         f"🔧 Точка входа: <code>{entry_file}</code>\n"
-        f"🐳 Контейнер: <code>bot_{project_id}</code>\n\n"
-        "Управляйте ботом через <b>📦 Мои боты</b>",
+        f"{mode_info}\n\n"
+        "Управляйте через <b>📦 Мои боты</b>",
         reply_markup=main_keyboard(),
     )
 
 
-# ── Callback: управление ботом ────────────────────────────────────────────────
+# ── Callback-обработчики управления ботом ─────────────────────────────────────
+
+def _get_bot_path(call: CallbackQuery, project_id: str) -> str:
+    """Возвращает путь к проекту, если пользователь — владелец."""
+    row = db.get_bot(project_id)
+    if row and row["user_id"] == call.from_user.id:
+        return _project_path(call.from_user.id, project_id)
+    return ""
+
 
 @dp.callback_query(F.data.startswith("start:"))
 async def cb_start(call: CallbackQuery):
     project_id = call.data.split(":", 1)[1]
-    _check_owner(call, project_id) or await call.answer("⛔ Нет доступа")
-    ok, msg = pm.restart_container(project_id)  # restart поднимет если был stopped
-    if not ok:
-        ok, msg = pm.start_container(
-            project_id,
-            os.path.abspath(f"projects/{call.from_user.id}/{project_id}"),
-            db.get_bot(project_id)["entry_file"] if db.get_bot(project_id) else "bot.py"
-        )
+    ppath = _get_bot_path(call, project_id)
+    if not ppath:
+        await call.answer("⛔ Нет доступа")
+        return
+    row = db.get_bot(project_id)
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, pm.restart_bot, project_id, ppath, row["entry_file"] if row else "bot.py"
+    )
     db.update_bot_status(project_id, "running" if ok else "error")
-    await call.answer("▶ Запущен" if ok else f"❌ {msg}")
+    await call.answer("▶ Запущен" if ok else f"❌ {msg[:50]}")
     await call.message.edit_reply_markup(reply_markup=bot_manage_keyboard(project_id))
 
 
 @dp.callback_query(F.data.startswith("stop:"))
 async def cb_stop(call: CallbackQuery):
     project_id = call.data.split(":", 1)[1]
-    ok, msg = pm.stop_container(project_id)
+    ppath = _get_bot_path(call, project_id)
+    if not ppath:
+        await call.answer("⛔ Нет доступа")
+        return
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, pm.stop_bot, project_id, ppath
+    )
     db.update_bot_status(project_id, "stopped" if ok else "error")
-    await call.answer("⏹ Остановлен" if ok else f"❌ {msg}")
+    await call.answer("⏹ Остановлен" if ok else f"❌ {msg[:50]}")
     await call.message.edit_reply_markup(reply_markup=bot_manage_keyboard(project_id))
 
 
 @dp.callback_query(F.data.startswith("restart:"))
 async def cb_restart(call: CallbackQuery):
     project_id = call.data.split(":", 1)[1]
-    ok, msg = pm.restart_container(project_id)
-    await call.answer("🔄 Перезапущен" if ok else f"❌ {msg}")
+    ppath = _get_bot_path(call, project_id)
+    if not ppath:
+        await call.answer("⛔ Нет доступа")
+        return
+    row = db.get_bot(project_id)
+    ok, msg = await asyncio.get_event_loop().run_in_executor(
+        None, pm.restart_bot, project_id, ppath, row["entry_file"] if row else "bot.py"
+    )
+    await call.answer("🔄 Перезапущен" if ok else f"❌ {msg[:50]}")
     await call.message.edit_reply_markup(reply_markup=bot_manage_keyboard(project_id))
 
 
 @dp.callback_query(F.data.startswith("logs:"))
 async def cb_logs(call: CallbackQuery):
     project_id = call.data.split(":", 1)[1]
-    logs = pm.get_logs(project_id, lines=30)
-    # Telegram ограничивает сообщение 4096 символами
-    logs_trimmed = logs[-3500:] if len(logs) > 3500 else logs
+    ppath = _get_bot_path(call, project_id)
+    if not ppath:
+        await call.answer("⛔ Нет доступа")
+        return
+    logs = pm.get_logs(project_id, ppath, lines=30)
+    trimmed = logs[-3500:] if len(logs) > 3500 else logs
     await call.message.answer(
-        f"📜 <b>Логи [{project_id}]</b>\n\n<pre>{logs_trimmed}</pre>"
+        f"📜 <b>Логи [{project_id}]</b>\n\n<pre>{trimmed}</pre>"
     )
     await call.answer()
 
@@ -350,42 +390,29 @@ async def cb_logs(call: CallbackQuery):
 @dp.callback_query(F.data.startswith("delete:"))
 async def cb_delete(call: CallbackQuery):
     project_id = call.data.split(":", 1)[1]
-    bot_row = db.get_bot(project_id)
-    if not bot_row or bot_row["user_id"] != call.from_user.id:
+    ppath = _get_bot_path(call, project_id)
+    if not ppath:
         await call.answer("⛔ Нет доступа")
         return
 
-    # Останавливаем и удаляем контейнер
-    pm.remove_container(project_id)
-
-    # Удаляем файлы проекта
-    project_path = os.path.abspath(f"projects/{call.from_user.id}/{project_id}")
-    dep.cleanup_project(project_path)
-
-    # Удаляем из БД
+    await asyncio.get_event_loop().run_in_executor(
+        None, pm.remove_bot, project_id, ppath
+    )
+    dep.cleanup_project(ppath)
     db.delete_bot(project_id)
 
     await call.answer("🗑 Удалён")
     await call.message.edit_text(f"🗑 Бот <code>{project_id}</code> удалён.")
 
 
-def _check_owner(call: CallbackQuery, project_id: str) -> bool:
-    """Проверяет, что обращающийся пользователь — владелец бота."""
-    row = db.get_bot(project_id)
-    return row is not None and row["user_id"] == call.from_user.id
-
-
 # ── Запуск ────────────────────────────────────────────────────────────────────
 
 async def main():
-    # Создаём папки при старте
     os.makedirs("projects", exist_ok=True)
     os.makedirs("logs", exist_ok=True)
-
-    # Инициализируем БД
     db.init_db()
 
-    logger.info("BotHost запускается...")
+    logger.info("BotHost запускается | Режим: %s", pm.get_runtime_mode())
     await dp.start_polling(bot, allowed_updates=dp.resolve_used_update_types())
 
 

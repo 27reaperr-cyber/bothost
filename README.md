@@ -1,7 +1,18 @@
 # 🤖 BotHost — Telegram Bot Hosting via Telegram
 
-Простой хостинг Telegram-ботов, управляемый через Telegram.  
+Хостинг Telegram-ботов, управляемый через Telegram.  
 Деплойте GitHub/GitLab репозитории одним сообщением.
+
+---
+
+## ⚡ Два режима работы (автоматически)
+
+| Условие | Режим | Изоляция |
+|---|---|---|
+| Docker сокет доступен | 🐳 Docker | Полная (контейнеры) |
+| Docker недоступен | ⚙️ Прямой запуск | venv + subprocess |
+
+Режим определяется **автоматически при старте** — никакой ручной настройки не нужно.
 
 ---
 
@@ -9,15 +20,15 @@
 
 ```
 tghost/
-├── bot.py              # Главный файл бота (handlers, FSM)
-├── deploy.py           # Логика деплоя (клонирование, валидация)
-├── database.py         # SQLite (пользователи, боты)
-├── process_manager.py  # Управление Docker-контейнерами
+├── bot.py              ← handlers, FSM, клавиатуры
+├── deploy.py           ← клонирование, валидация, .env
+├── database.py         ← SQLite (users, bots)
+├── process_manager.py  ← гибридный менеджер (Docker / прямой)
 ├── requirements.txt
 ├── Dockerfile
 ├── .env.example
-├── projects/           # Папки задеплоенных ботов
-└── logs/               # Логи
+├── projects/           ← папки задеплоенных ботов
+└── logs/               ← логи (прямой режим)
 ```
 
 ---
@@ -25,59 +36,36 @@ tghost/
 ## ⚙️ Требования
 
 - Python 3.10+
-- Docker
 - Git
+- Docker (опционально — без него работает в прямом режиме)
 
 ---
 
-## 🚀 Установка и запуск
-
-### 1. Клонируйте репозиторий
+## 🚀 Быстрый старт (без Docker)
 
 ```bash
 git clone https://github.com/your/tghost.git
 cd tghost
-```
 
-### 2. Создайте `.env`
-
-```bash
 cp .env.example .env
-nano .env
-```
+# Укажите BOT_TOKEN в .env
 
-Укажите токен бота:
-```
-BOT_TOKEN=123456789:ABCdefGHI...
-```
-
-### 3. Установите зависимости
-
-```bash
 pip install -r requirements.txt
-```
-
-### 4. Запустите бота
-
-```bash
 python bot.py
 ```
 
+Бот автоматически определит, что Docker недоступен, и будет запускать  
+деплоимые боты напрямую через `subprocess` + `venv`.
+
 ---
 
-## 🐳 Запуск через Docker
+## 🐳 Запуск через Docker (с Docker-режимом для ботов)
 
-### Сборка образа
+> Монтируем Docker socket — это позволяет боту управлять дочерними контейнерами.
 
 ```bash
 docker build -t bothost .
-```
 
-### Запуск контейнера
-
-> ⚠️ Монтируем Docker socket, чтобы бот мог управлять дочерними контейнерами.
-
-```bash
 docker run -d \
   --name bothost \
   --env-file .env \
@@ -88,80 +76,60 @@ docker run -d \
   bothost
 ```
 
-### Просмотр логов
+### ❌ Ошибка: `no such file or directory: /var/run/docker.sock`
 
-```bash
-docker logs -f bothost
-```
+Это значит, что Docker сокет не примонтирован или Docker не установлен на хосте.  
+**Решения:**
+
+1. **Простое** — запустите бота напрямую (`python bot.py`), Docker-режим не нужен.
+2. **С Docker** — добавьте `-v /var/run/docker.sock:/var/run/docker.sock` к `docker run`.
+3. **На Bothost.ru / shared хостинге** — используйте прямой запуск (`python bot.py`).
 
 ---
 
-## 📋 Пример использования
+## 📋 Пример деплоя бота
 
-1. Откройте бота в Telegram
+1. Откройте BotHost в Telegram
 2. Нажмите **🚀 Deploy бот**
-3. Отправьте ссылку на репозиторий:
+3. Отправьте ссылку:
    ```
    https://github.com/example/my-telegram-bot
    ```
-4. Бот клонирует репозиторий и проверит:
-   - что это Python-проект
-   - что используется Telegram-библиотека
-5. Введите переменные окружения:
+4. Введите переменные:
    ```
    BOT_TOKEN=123456:ABC
-   DATABASE_URL=sqlite:///db.sqlite3
    ```
-6. Напишите `done` — бот запустится в Docker-контейнере!
+5. Напишите `done` — бот запущен!
 
 ---
 
 ## 🔧 Требования к деплоимому репозиторию
 
-| Требование | Детали |
+| | |
 |---|---|
 | Язык | Python 3.x |
 | Точка входа | `bot.py`, `main.py`, `app.py` или файл с `__main__` |
-| Telegram-фреймворк | `aiogram`, `python-telegram-bot`, `pyTelegramBotAPI`, `telebot` |
+| Фреймворк | `aiogram`, `python-telegram-bot`, `pyTelegramBotAPI`, `telebot` |
 
 ---
 
 ## 🛡️ Безопасность
 
-- Только GitHub/GitLab репозитории (валидация regex)
-- Subprocess без `shell=True`
-- Валидация ENV-переменных (запрет инъекций)
+- Только GitHub/GitLab (валидация regex)
+- `subprocess` без `shell=True`
+- Валидация ENV (запрет `$()` и обратных кавычек)
 - Максимум 3 бота на аккаунт
-- Лимиты контейнера: 512 МБ RAM, 0.5 CPU
+- Docker: 512 МБ RAM, 0.5 CPU на контейнер
 
 ---
 
-## 📊 Кнопки управления
+## 📊 Кнопки
 
 | Кнопка | Действие |
 |---|---|
 | 🚀 Deploy бот | Задеплоить новый бот |
-| 📦 Мои боты | Список ботов с управлением |
-| 📊 Статус сервера | CPU / RAM / Диск / Контейнеры |
+| 📦 Мои боты | Список с управлением |
+| 📊 Статус сервера | CPU / RAM / Диск / режим |
 | ℹ️ Помощь | Инструкция |
 
-### Inline-управление каждым ботом:
-
-| Кнопка | Действие |
-|---|---|
-| ▶ Запустить | `docker restart` |
-| ⏹ Остановить | `docker stop` |
-| 🔄 Перезапустить | `docker restart` |
-| 📜 Логи | `docker logs --tail 30` |
-| 🗑 Удалить | Удалить контейнер, образ и файлы |
-
----
-
-## 🔄 Обновление
-
-```bash
-git pull
-docker build -t bothost .
-docker stop bothost && docker rm bothost
-# затем повторный docker run (см. выше)
-```
+Inline-управление каждым ботом: ▶ ⏹ 🔄 📜 🗑
