@@ -289,41 +289,44 @@ async def deploy_got_env(message: Message, state: FSMContext):
             "<code>(ожидание вывода pip)</code>"
         )
 
-        # Буфер последних символов для отображения
-        output_buf: list[str] = []
-        SHOW_CHARS = 1000
+        # Буфер для финального показа
+        last_text: list[str] = ["(ожидание вывода pip)"]
 
         # Антифлуд: редактируем не чаще раза в секунду
         _last_edit: list[float] = [0.0]
 
         async def on_output(chunk: str):
-            output_buf.append(chunk)
+            """
+            Вызывается watchdog'ом каждые 3 сек и reader'ом при новых данных.
+            chunk уже содержит готовый хвост от watchdog'а.
+            """
+            last_text[0] = chunk
             now = asyncio.get_event_loop().time()
             if now - _last_edit[0] < 1.0:
                 return
             _last_edit[0] = now
-            tail = "".join(output_buf)[-SHOW_CHARS:]
+            # Обрезаем до 1000 символов для Telegram
+            display = chunk[-1000:] if len(chunk) > 1000 else chunk
             try:
                 await progress.edit_text(
                     "⚙️ <b>Подготовка виртуального окружения...</b>\n\n"
-                    f"<code>{tail}</code>"
+                    f"<code>{display}</code>"
                 )
             except Exception:
-                pass  # MessageNotModified и прочие — игнорируем
+                pass  # MessageNotModified — игнорируем
 
         ok, result = await pm.async_setup_venv(project_path, on_output)
 
-        # Финальное обновление с полным хвостом
-        tail = "".join(output_buf)[-SHOW_CHARS:]
+        display = last_text[0][-1000:]
         if not ok:
             await progress.edit_text(
-                f"❌ <b>Ошибка подготовки окружения:</b>\n\n<code>{tail}</code>"
+                f"❌ <b>Ошибка подготовки окружения:</b>\n\n<code>{display}</code>"
             )
             dep.cleanup_project(project_path)
             await state.clear()
             return
         await progress.edit_text(
-            f"✅ <b>Окружение готово!</b>\n\n<code>{tail}</code>"
+            f"✅ <b>Окружение готово!</b>\n\n<code>{display}</code>"
         )
 
     launch_msg = await message.answer("🚀 Запуск бота...")

@@ -159,19 +159,24 @@ def _direct_setup_venv(project_path: str) -> tuple[bool, str]:
 
 async def async_setup_venv(
     project_path: str,
-    on_output,          # callable(str) — вызывается при каждой новой строке
+    on_output,          # async callable(str) — вызывается при каждом обновлении
 ) -> tuple[bool, str]:
     """
-    Асинхронная версия с потоковым выводом.
-    on_output(chunk: str) вызывается для каждой новой порции вывода,
-    чтобы бот мог редактировать сообщение в реальном времени.
+    Асинхронная установка venv + pip с живым прогрессом.
+
+    Две параллельные задачи:
+      • reader  — читает stdout pip мелкими чанками (обходит буферизацию)
+      • watchdog — каждые 3 сек отправляет heartbeat даже если pip молчит
+
+    Общий таймаут: 180 сек. При превышении — процесс убивается.
     """
     import asyncio
+    import time
 
     venv_path = os.path.join(project_path, ".venv")
-    req = os.path.join(project_path, "requirements.txt")
+    req       = os.path.join(project_path, "requirements.txt")
 
-    # ── Шаг 1: создать venv ───────────────────────────────────────────────────
+    # ── Шаг 1: создать venv (быстро, буферизация не мешает) ──────────────────
     if not os.path.exists(venv_path):
         await on_output("📦 Создание виртуального окружения...\n")
         proc = await asyncio.create_subprocess_exec(
@@ -179,47 +184,101 @@ async def async_setup_venv(
             stdout=asyncio.subprocess.PIPE,
             stderr=asyncio.subprocess.STDOUT,
         )
-        stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
-        output = stdout.decode(errors="replace")
-        if output.strip():
-            await on_output(output)
+        try:
+            stdout, _ = await asyncio.wait_for(proc.communicate(), timeout=60)
+        except asyncio.TimeoutError:
+            proc.kill()
+            return False, "Создание venv зависло (таймаут 60 сек)"
+        out = stdout.decode(errors="replace")
+        if out.strip():
+            await on_output(out)
         if proc.returncode != 0:
-            return False, f"Ошибка создания venv:\n{output}"
+            return False, f"Ошибка venv:\n{out}"
+        await on_output("✅ venv создан\n")
 
-    # ── Шаг 2: pip install ────────────────────────────────────────────────────
     pip = os.path.join(venv_path, "bin", "pip")
 
+    # ── Шаг 2: pip install ────────────────────────────────────────────────────
     if not os.path.exists(req):
-        await on_output("⚠️ requirements.txt не найден, пропускаем pip install\n")
+        await on_output("⚠️ requirements.txt не найден — пропускаем pip install\n")
         return True, "venv готов (без зависимостей)"
 
     await on_output("📥 Запускаю pip install...\n")
 
+    # PYTHONUNBUFFERED=1 — форсируем сброс буфера у дочернего python/pip
+    env = os.environ.copy()
+    env["PYTHONUNBUFFERED"] = "1"
+    env["PIP_NO_COLOR"] = "1"
+
     proc = await asyncio.create_subprocess_exec(
         pip, "install",
         "--no-cache-dir",
-        "--timeout", "30",
-        "--progress-bar", "off",   # убираем прогресс-бар, оставляем только текст
+        "--timeout", "60",        # таймаут соединения с PyPI
+        "--progress-bar", "off",
         "-r", req,
         cwd=project_path,
+        env=env,
         stdout=asyncio.subprocess.PIPE,
         stderr=asyncio.subprocess.STDOUT,
     )
 
-    # Читаем построчно и отправляем в callback
-    try:
-        async for raw_line in proc.stdout:
-            line = raw_line.decode(errors="replace")
-            await on_output(line)
+    output_buf: list[str] = []
+    start_time = time.monotonic()
+    TOTAL_TIMEOUT = 180  # секунд до принудительного kill
 
-        await asyncio.wait_for(proc.wait(), timeout=5)
-    except asyncio.TimeoutError:
-        proc.kill()
-        return False, "pip install завис и был остановлен (таймаут)"
+    # ── reader: читает чанками по 256 байт, не ждёт newline ──────────────────
+    async def reader():
+        while True:
+            try:
+                chunk = await asyncio.wait_for(
+                    proc.stdout.read(256), timeout=2.0
+                )
+            except asyncio.TimeoutError:
+                # pip молчит — просто продолжаем (watchdog покажет таймер)
+                continue
+            if not chunk:
+                break
+            output_buf.append(chunk.decode(errors="replace"))
+
+    # ── watchdog: heartbeat каждые 3 сек + убивает при таймауте ──────────────
+    async def watchdog():
+        while proc.returncode is None:
+            await asyncio.sleep(3)
+            elapsed = int(time.monotonic() - start_time)
+            tail = "".join(output_buf)[-900:]  # последние ~900 символов
+            await on_output(f"\n⏱ {elapsed} сек...\n{tail}")
+            if elapsed >= TOTAL_TIMEOUT:
+                logger.warning("pip install таймаут (%d сек), убиваем процесс", elapsed)
+                proc.kill()
+                return
+
+    # Запускаем обе задачи параллельно
+    reader_task   = asyncio.create_task(reader())
+    watchdog_task = asyncio.create_task(watchdog())
+
+    # Ждём завершения процесса
+    await proc.wait()
+
+    # Останавливаем задачи
+    reader_task.cancel()
+    watchdog_task.cancel()
+    try:
+        await reader_task
+    except asyncio.CancelledError:
+        pass
+    try:
+        await watchdog_task
+    except asyncio.CancelledError:
+        pass
+
+    elapsed = int(time.monotonic() - start_time)
+    tail    = "".join(output_buf)[-900:]
 
     if proc.returncode != 0:
-        return False, "pip install завершился с ошибкой (см. вывод выше)"
+        await on_output(f"\n❌ pip завершился с ошибкой (код {proc.returncode})\n")
+        return False, tail or f"pip ошибка (код {proc.returncode})"
 
+    await on_output(f"\n✅ pip install завершён за {elapsed} сек\n")
     return True, "venv готов"
 
 
